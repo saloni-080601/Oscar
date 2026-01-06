@@ -14,6 +14,8 @@ export default function RecordingPage() {
   const [recordingTime, setRecordingTime] = useState(0)
   const sttRef = useRef<STTLogic | null>(null)
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  // Accumulate transcript robustly across STT internal restarts
+  const accumulatedTranscriptRef = useRef<string>('')
   const router = useRouter()
 
   // Initialize STT on component mount
@@ -37,16 +39,19 @@ export default function RecordingPage() {
             console.log(`[STT ${level || 'info'}]`, message)
           },
           (transcript) => {
-            // Always update transcript, even if empty (to track state)
-            setCurrentTranscript(transcript || '')
-            if (transcript && transcript.trim()) {
-              console.log('Transcript updated:', transcript)
+            const incoming = transcript || ''
+            const merged = mergeTranscripts(accumulatedTranscriptRef.current, incoming)
+            accumulatedTranscriptRef.current = merged
+            setCurrentTranscript(merged)
+            if (incoming.trim()) {
+              console.log('Transcript updated:', incoming)
             }
           },
           {
             sessionDurationMs: 60000,
             interimSaveIntervalMs: 2000, // More frequent updates
-            preserveTranscriptOnStart: false,
+            // Preserve text across internal restarts (common on mobile Safari)
+            preserveTranscriptOnStart: true,
           }
         )
         
@@ -93,8 +98,9 @@ export default function RecordingPage() {
 
       // Start STT
       try {
+        // Start a fresh session, but preserve text across internal restarts
+        accumulatedTranscriptRef.current = ''
         setCurrentTranscript('')
-        sttRef.current.clearTranscript()
         sttRef.current.start()
         console.log('STT started, waiting for speech...')
       } catch (error) {
@@ -310,5 +316,30 @@ export default function RecordingPage() {
       </div>
     </main>
   )
+}
+
+// Merge incoming transcript updates with previously accumulated text.
+// Handles restarts that reset the incoming text and avoids repeating sentences.
+function mergeTranscripts(previous: string, incoming: string): string {
+  if (!incoming) return previous
+  if (!previous) return incoming
+
+  // If incoming is a superset (common when recognition continues), prefer it.
+  if (incoming.startsWith(previous)) return incoming
+  if (incoming.includes(previous)) return incoming
+
+  // If incoming is wholly contained in previous, ignore to avoid repeats.
+  if (previous.includes(incoming)) return previous
+
+  // Compute maximal overlap where previous suffix equals incoming prefix.
+  const max = Math.min(previous.length, incoming.length)
+  for (let i = max; i > 0; i--) {
+    if (previous.slice(-i) === incoming.slice(0, i)) {
+      return previous + incoming.slice(i)
+    }
+  }
+
+  // Fallback: append with a separating space.
+  return previous + (previous.endsWith(' ') ? '' : ' ') + incoming
 }
 
